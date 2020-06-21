@@ -1,0 +1,342 @@
+#!/usr/bin/bash
+
+# Script to  Create Samba server with users
+
+#####################################
+# Checking root privilage
+
+if [ "$EUID" -ne 0 ]
+then
+	echo "Please run as root"
+	echo "Like: 'sudo ./script_name' or 'sudo bash script_name'"
+	exit
+fi
+
+###########################
+# IMP VARIABLES
+
+CONFIG_FILE="/etc/samba/smb.conf"
+FILE_PRESENT="NO"
+DEST_DIR="/home/samba" # you can change this variable only and only if you are running this script the first in your system
+
+####### Functions ###################
+
+function service {
+	systemctl $1 smbd.service
+}
+
+function check_Samba {
+	which samba > /dev/null
+	if [ $? -eq 1 ]
+	then
+		echo
+		echo "Installing Samba Server using apt..."
+		apt-get install samba > /dev/null
+		if [ $? -eq 0 ]
+		then
+			echo "Samba Sever Installed"
+		else
+			echo "Unable to Install Samba"
+			echo "Try the mannual mode using : sudo apt-get install samba"
+			echo "Then continue"
+			echo "-----------Exiting the Script---------"
+			exit 1
+		fi
+		service start
+	fi
+	exit 0
+}
+
+function check_File {
+
+	echo "Checking Configuration File :"
+	if [ -f $CONFIG_FILE ]
+	then
+		head $CONFIG_FILE | grep file_present > /dev/null
+		if [ $? -eq 0 ]
+			echo "File Present"
+			FILE_PRESENT="YES"
+			exit 0
+		else
+			echo "NO old configuration file found"
+			echo "Generating New Configuration File"
+			global_Options
+			return $? 
+		fi
+	else
+		echo "File 'smb.conf' does not exist or not located at /etc/samba/ directory."
+		echo "Unable to change any configuration, exiting the script"
+		exit 1
+	fi
+}
+	
+function global_Options {
+	systemctl stop smbd.service
+	mv $CONFIG_FILE /etc/samba/smb.conf.orig
+	echo "Original samba config file is moved to same directory as smb.conf.orig"
+	echo "A custom build conf file is added to its place"
+	if [ -f ./global ]
+	then
+		echo "Adding Global Section"
+		echo "# file_present" >> $CONFIG_FILE
+		cat ./global >> $CONFIG_FILE
+		echo -n "Choose the Name of the server: "
+		read name
+		echo "Find your ethernet inet address using 'ifconfig' command."
+		echo "It will display all the 'interfaces' choose your ethernet port."
+		echo "The inet address will be like '192.168.XX.XXX'."
+		echo -n "Enter your inet address : "
+		read ip
+		echo "In case you wish to change the inet address in samba config file you need to manually the '$CONFIG_FILE'."
+		sleep 4
+		sed -i "s/samba_server/$name/; s/your_network_interface/$ip/" global >> $CONFIG_FILE
+		echo "Global options added to the conf file"
+		echo "Name of the server: $name"
+		echo "IP Address of the server: $ip"
+		echo "You can note them down, they are used to connect to client"
+		sleep 5
+		echo "Configuration File created with suitable global options"
+		echo "You can view the global options in 'global' file from present directory"
+		FILE_PRESENT="YES"
+		exit 0
+
+	else
+		echo "The 'global' file is not located inside the present directory"
+		echo "Please download it; and place it in present directory"
+		echo "Unable to create new Configuration file"
+		mv /etc/samba/smb.conf.orig $CONFIG_FILE
+		exit 1
+	fi
+}
+
+function add_user {
+	# parameter list 1- username 2-sharing_to_everyone[0\1] 
+	cut -d':' -f1 /etc/passwd | grep $1 >> /dev/null
+	if [ $? -eq 1 ]
+	then
+		echo "User account already exist on the system"
+		echo "Choose a different name; and try again."
+		exit 1
+	else
+		echo "Creating user '$1'"
+		echo "Creating user directory under Destination directory i.e $DEST_DIR"
+		mkdir $DEST_DIR/$1/
+		if [ $2 -eq 1 ]
+		then
+			adduser --home $DEST_DIR/$1 --no-create-home --shell /usr/sbin/nologin --ingroup sambashare admin
+		else
+		adduser --home $DEST_DIR/$1 --no-create-home --shell /usr/sbin/nologin --ingroup sambashare $1
+		fi
+		echo "Changing the ownership and permissions on $1 Directory"
+		if [ $2 -eq 1 ] 	# if it is shared to everyone thenpass 2 parameters
+		then
+			/usr/bin/chown admin:sambashare $DEST_DIR/$1/
+		else
+			/usr/bin/chown $1:sambashare $DEST_DIR/$1/
+		fi
+		/usr/bin/chmod 2770 $DEST_DIR/$1/
+		echo "User created succesfully"
+		exit 0
+	fi
+}
+
+function add_samba_user {
+	/usr/bin/pdbedit -L | cut -d':' -f1 | grep $1 >> /dev/null
+	if [ $? -eq 1 ]
+	then
+		echo "Adding user $1"
+		smbpasswd -a $1
+		echo "Enabling user $1"
+		smbpasswd -e $1
+		exit 0
+	else
+		echo "User already exists with the same name."
+		exit 1
+	fi
+}
+
+function samba_share { 		# it will make changes to smb.conf file
+	# parameter list 1-userName 2-browseable[yes/no] 3-for everyone[0/1]
+	bro="no"
+	case $2 in 
+		[yY]|[yY][eE][sS] )
+			bro="yes"
+			;;
+	esac
+	echo "\n\
+		[$1]\n\
+		\tpath = $DEST_DIR/$1\n\
+		\tbrowseable = $bro\n\
+		\tread only = no\n\
+		\tforce create mode = 0660\n\
+		\tforce directory mode = 2770\n" >> $CONFIG_FILE
+	if [ $3 -eq 0 ]
+	then
+		echo "\tvalid users = $1 @admins" >> $CONFIG_FILE
+	else
+		echo "\tvalid users = @sambashare @admins" >> $CONFIG_FILE
+	fi
+
+	}
+
+function menu {
+	echo "\tSamba Server Configurator\n\
+		1) Add User with samba share\n\
+		2) Add User\n\
+		3) Add Samba Share for a user\n\
+		4) EXIT"
+	}
+
+function first_Time {
+	if [ -d $DEST_DIR ]
+	then
+		echo
+	else
+		echo "Visting First Time"
+		echo "Need to create some basic stuff"
+		echo "Step-1 Checking Samba"
+		check_Samba
+		echo "Step -2 Setting up smb.conf file"
+		echo "Creating Samba storage facility at $DEST_DIR"
+		mkdir $DEST_DIR
+		echo "Changing the ownership of the group to 'sambashare' to make it shareable"
+		chown :sambashare $DEST_DIR
+		check_File
+		echo "Adding a Sharing based Directory to be accessible to everyone"
+		add_user everyone 1
+		echo "Adding admin user"
+		smbpasswd -a admin
+		echo "Enabling admin user"
+		smbpasswd -e admin
+		echo "Creating the samba share in smb.conf file"
+		samba_share everyone yes 1
+		echo "Group add admin"
+		groupadd admins
+		usermod -G admins admin
+		echo "Testing the smb.conf file"
+		testparm > /dev/null
+	        if [ $? -eq 0 ]
+		then
+			exit 0
+		else
+			echo "Unable to create configuration file --smb.conf try again or try to add it manually"
+			exit 1	
+		fi
+	fi
+}
+
+function menu_Add_User_Samba_Share {
+	first_Time
+	check_File
+	if [ $? -eq 1 ]
+	then
+		echo "Unable to add user due to technical error!"
+		exit 1
+	else
+		echo -n "Enter the name of the user: "
+		read user
+		add_user $user 0
+		echo "Adding the user to samba server"
+		add_samba_user $user
+		echo "Adding user to samba configuration file"
+		samba_share $user yes 0
+		echo
+		if [ $? -eq 0 ]
+			echo "User added Sucessfully"
+			exit 0
+		else
+			echo "Falied to add user"
+			exit 1
+		fi
+	fi
+}
+
+function menu_Add_User {
+	first_Time
+	check_File
+	if [ $? -eq 1 ]
+		echo "Unable to add user due to technical error!"
+		exit 1
+	else
+		echo -n "Enter the name of the user: "
+		read user
+		add_user $user 0
+		echo 
+		if [ $? -eq 0 ]
+			echo "User added sucessfully"
+			exit 0
+		else
+			echo "Falied to add user "
+			exit 1
+		fi
+	fi
+}
+
+function menu_Add_Share_User {
+	first_Time
+	check_File
+	if [ $? -eq 1 ]
+		echo "Unable to add user due to technical error!"
+		exit 1
+	else
+		echo -n "Enter the name of user: "
+		read user
+		echo "Adding user to samba server "
+		add_samba_user $user
+		echo "Adding user to samba configuration file"
+		samba_share $user yes 0
+		echo
+		if [ $? -eq 0 ]
+			echo "User added Sucessfully"
+			exit 0
+		else
+			echo "Failed to add user"
+			exit 1
+		fi
+	fi
+}
+
+function smbclient_Tutorial {
+	echo "Smbclient tutorial\n\
+	to test it quick u can install 'smbclient' on your machine\n\
+	'sudo apt-get install smbclient'\n\ 
+	use it as follows:\n\
+	smbclient //server_ip_OR_samba_hostname/share -U username\n\
+	if a user wants to access its share then 'share' & 'username' will be same\n\
+	if a user wants to access everyone or common share change the 'share' to 'common_share_name'\n\
+	admin user can access any file of any user"
+}
+
+
+
+#####################################
+###### Main Scripts #################
+
+####### MENU ##########
+option=0
+while [ 1 ]
+do
+	menu
+	echo -n "Enter choice: "
+	read -n 1 option
+	case $option in
+		1) 
+			menu_Add_User_Samba_Share
+			;;
+		2)
+			menu_Add_User
+			;;
+		3)
+			menu_Add_Samba_Share_User
+			;;
+		4)
+			smbclient_Tutorial
+			;;
+		5)
+			break
+			;;
+		*)
+			echo "\nSorry, Invalid selection\n"
+			;;
+	esac
+done

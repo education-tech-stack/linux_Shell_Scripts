@@ -1,0 +1,9 @@
+[global]
+        server string = samba_server
+        server role = standalone server
+        interfaces = lo your_network_interface
+        bind interfaces only = yes
+        disable netbios = yes
+        smb ports = 445
+        log file = /var/log/samba/smb.log
+        max log size = 10000
